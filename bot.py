@@ -1,5 +1,28 @@
+import http.server
+import os
+import socketserver
+import threading
+
+PORT = int(os.environ.get("PORT", 10000))
+
+
+class SimpleHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+
+def run_server():
+    with socketserver.TCPServer(("0.0.0.0", PORT), SimpleHandler) as httpd:
+        httpd.serve_forever()
+
+
+server_thread = threading.Thread(target=run_server, daemon=True)
+server_thread.start()
 import asyncio
 import logging
+import os
 import sys
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -7,7 +30,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-TOKEN = "8860695938:AAHlZrF2L7MQg2NGlSxTG4S1sDs3HdaNH60"
+# Безопасно считываем токен из переменных окружения Render
+TOKEN = os.getenv("BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -215,7 +239,7 @@ def get_cancel_message_keyboard(lang):
 
 
 async def send_profile_to_user(
-    recipient_id: int, profile_data: dict, intro_text: str
+        recipient_id: int, profile_data: dict, intro_text: str
 ):
     name = profile_data.get("name")
     age = profile_data.get("age")
@@ -375,9 +399,7 @@ async def process_age(message: types.Message, state: FSMContext):
                 "Iltimos, yoshingizni faqat raqamlarda kiriting (masalan: 20):"
             )
         elif lang == "en":
-            await message.answer(
-                "Please enter your age using numbers only (e.g. 20):"
-            )
+            await message.answer("Please enter your age using numbers only (e.g. 20):")
         else:
             await message.answer(
                 "Пожалуйста, введите возраст цифрами (например: 20):"
@@ -392,13 +414,11 @@ async def process_age(message: types.Message, state: FSMContext):
                 "Yoshingiz 16 dan 70 gacha bo'lishi kerak. Qaytadan kiriting:"
             )
         elif lang == "en":
-            await message.answer(
-                "Age must be between 16 and 70. Please enter again:"
-            )
+            await message.answer("Age must be between 16 and 70. Please enter again:")
         else:
             await message.answer(
-                "Возраст должен быть от 16 до 70 лет. Пожалуйста, введите"
-                " корректное число:"
+                "Возраст должен быть от 16 до 70 лет. Пожалуйста, введите корректное"
+                " число:"
             )
         return
 
@@ -406,15 +426,12 @@ async def process_age(message: types.Message, state: FSMContext):
     await state.set_state(RegistrationStates.waiting_for_location)
 
     if lang == "uz":
-        text = (
-            "3️⃣ Yashashingiz hududni aniqlash uchun lokatsiyatingizni yuboring:"
-        )
+        text = "3️⃣ Yashashingiz hududni aniqlash uchun lokatsiyatingizni yuboring:"
     elif lang == "en":
         text = "3️⃣ Please send your location to determine your city:"
     else:
         text = (
-            "3️⃣ Пожалуйста, отправьте вашу локацию, чтобы указать город в"
-            " анкете:"
+            "3️⃣ Пожалуйста, отправьте вашу локацию, чтобы указать город в анкете:"
         )
 
     await message.answer(text, reply_markup=get_location_keyboard(lang))
@@ -467,18 +484,18 @@ async def process_description(message: types.Message, state: FSMContext):
 
     if lang == "uz":
         await message.answer(
-            "5️⃣ Endi 1 tadan 3 tagacha rasm yoki video yuboring.\n"
-            "Barchasini yuborib bo'lgach, **Tayyor** deb yozing."
+            "5️⃣ Endi 1 tadan 3 tagacha rasm yoki video yuboring.\nBarchasini"
+            " yuborib bo'lgach, **Tayyor** deb yozing."
         )
     elif lang == "en":
         await message.answer(
-            "5️⃣ Now send from 1 to 3 photos or videos.\n"
-            "When you are finished, type **Ready**."
+            "5️⃣ Now send from 1 to 3 photos or videos.\nWhen you are finished, type"
+            " **Ready**."
         )
     else:
         await message.answer(
-            "5️⃣ Теперь отправьте от 1 до 3 фото или видео.\n"
-            "Когда закончите отправку файлов, напишите слово **Готово**."
+            "5️⃣ Теперь отправьте от 1 до 3 фото или видео.\nКогда закончите"
+            " отправку файлов, напишите слово **Готово**."
         )
 
 
@@ -522,8 +539,8 @@ async def finish_registration(message: types.Message, state: FSMContext):
 
     if lang == "uz":
         await message.answer(
-            "✅ Anketangiz muvaffaqiyatli yaratildi!\n\nEndi davom"
-            " etamiz. Jinsingizni tanlang:"
+            "✅ Anketangiz muvaffaqiyatli yaratildi!\n\nEndi davom etamiz."
+            " Jinsingizni tanlang:"
         )
     elif lang == "en":
         await message.answer(
@@ -588,12 +605,7 @@ async def process_preference(message: types.Message, state: FSMContext):
         pref = "male"
     elif "девушки" in text or "girls" in text or "qizlar" in text:
         pref = "female"
-    elif (
-        "все" in text
-        or "everyone" in text
-        or "farqi" in text
-        or "barchasi" in text
-    ):
+    elif "все" in text or "everyone" in text or "farqi" in text or "barchasi" in text:
         pref = "all"
     else:
         if lang == "uz":
@@ -676,8 +688,8 @@ async def process_media(message: types.Message, state: FSMContext):
         remaining = 3 - len(media_list)
         if lang == "uz":
             await message.answer(
-                f"Qabul qilindi! Yana {remaining} ta rasm/video yuborishingiz"
-                " mumkin yoki **Tayyor** deb yozing."
+                f"Qabul qilindi! Yana {remaining} ta rasm/video yuborishingiz mumkin"
+                " yoki **Tayyor** deb yozing."
             )
         elif lang == "en":
             await message.answer(
@@ -830,6 +842,65 @@ async def show_next_profile(message: types.Message, state: FSMContext):
         await message.answer(caption_text, reply_markup=keyboard)
 
 
+@dp.message(SearchStates.waiting_for_message)
+async def process_user_message_to_target(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    lang = user_data.get("language", "ru")
+    target_uid = user_data.get("current_target_uid")
+
+    text = message.text
+    if text and text.lower() in ["❌ отменить", "❌ cancel", "❌ bekor qilish"]:
+        await state.set_state(SearchStates.browsing)
+        if lang == "uz":
+            await message.answer("Xabar yuborish bekor qilindi.")
+        elif lang == "en":
+            await message.answer("Message sending cancelled.")
+        else:
+            await message.answer("Отправка сообщения отменена.")
+
+        profile = user_data.get("current_profile", {})
+        profile_gender = profile.get("gender", "male")
+        await message.answer(
+            "Продолжаем просмотр:" if lang == "ru" else "Davom etamiz:",
+            reply_markup=get_search_control_keyboard(lang, profile_gender)
+        )
+        return
+
+    if target_uid:
+        try:
+            sender_name = user_data.get("name", "Пользователь")
+            if lang == "uz":
+                msg_notification = f"💌 {sender_name} sizga xabar yubordi:\n\n{text}"
+            elif lang == "en":
+                msg_notification = f"💌 {sender_name} sent you a message:\n\n{text}"
+            else:
+                msg_notification = f"💌 {sender_name} оставил(а) для вас сообщение:\n\n{text}"
+
+            await bot.send_message(chat_id=target_uid, text=msg_notification)
+
+            if lang == "uz":
+                await message.answer("✅ Xabaringiz yuborildi!")
+            elif lang == "en":
+                await message.answer("✅ Your message has been sent!")
+            else:
+                await message.answer("✅ Ваше сообщение успешно отправлено!")
+        except Exception as e:
+            logging.error(f"Error sending message to {target_uid}: {e}")
+
+    await state.set_state(SearchStates.browsing)
+    profile = user_data.get("current_profile", {})
+    profile_gender = profile.get("gender", "male")
+
+    if lang == "uz":
+        await message.answer("Keyingi anketa:", reply_markup=get_search_control_keyboard(lang, profile_gender))
+    elif lang == "en":
+        await message.answer("Next profile:", reply_markup=get_search_control_keyboard(lang, profile_gender))
+    else:
+        await message.answer("Следующая анкета:", reply_markup=get_search_control_keyboard(lang, profile_gender))
+
+    await show_next_profile(message, state)
+
+
 @dp.message(SearchStates.browsing)
 async def process_search_actions(message: types.Message, state: FSMContext):
     text = message.text.lower()
@@ -837,12 +908,7 @@ async def process_search_actions(message: types.Message, state: FSMContext):
     lang = user_data.get("language", "ru")
     user_id = message.from_user.id
 
-    if (
-        "стоп" in text
-        or "stop" in text
-        or "to'xtatish" in text
-        or "остановить" in text
-    ):
+    if "стоп" in text or "stop" in text or "to'xtatish" in text or "остановить" in text:
         await state.set_state(RegistrationStates.active)
         if lang == "uz":
             await message.answer(
@@ -858,12 +924,7 @@ async def process_search_actions(message: types.Message, state: FSMContext):
             )
         return
 
-    if (
-        "сообщение" in text
-        or "message" in text
-        or "xabar" in text
-        or "оставить" in text
-    ):
+    if "сообщение" in text or "message" in text or "xabar" in text or "оставить" in text:
         await state.set_state(SearchStates.waiting_for_message)
         if lang == "uz":
             await message.answer(
@@ -887,10 +948,6 @@ async def process_search_actions(message: types.Message, state: FSMContext):
     if any(word in text for word in ["лайк", "like", "yoqdi", "понрав"]):
         target_user_id = user_data.get("current_target_uid")
 
-        print(
-            f"\n[DEBUG] Пользователь {user_id} ставит лайк на цель {target_user_id}"
-        )
-
         if target_user_id:
             if user_id not in LIKES:
                 LIKES[user_id] = set()
@@ -899,12 +956,7 @@ async def process_search_actions(message: types.Message, state: FSMContext):
             target_liked_set = LIKES.get(target_user_id, set())
             is_mutual = user_id in target_liked_set
 
-            print(f"[DEBUG] Лайки пользователя {user_id}: {LIKES[user_id]}")
-            print(f"[DEBUG] Лайки цели {target_user_id}: {target_liked_set}")
-            print(f"[DEBUG] Взаимность (is_mutual): {is_mutual}")
-
             if is_mutual:
-                print(f"[DEBUG] СРАБОТАЛ MATCH МЕЖДУ {user_id} И {target_user_id}!")
                 my_profile = DATABASE.get(user_id, {})
                 target_profile = DATABASE.get(target_user_id, {})
                 target_lang = target_profile.get("language", "ru")
@@ -947,127 +999,25 @@ async def process_search_actions(message: types.Message, state: FSMContext):
                     elif target_lang == "en":
                         notif_text = "❤️ Someone liked you! Send /search to see who it is."
                     else:
-                        notif_text = "❤️ Кому-то понравилась ваша анкета! Нажмите /search, чтобы посмотреть."
+                        notif_text = "❤️ Кому-то понравилась ваша анкета! Нажми /search, чтобы посмотреть."
 
-                    await bot.send_message(target_user_id, notif_text)
+                    await bot.send_message(chat_id=target_user_id, text=notif_text)
                 except Exception as e:
-                    print(f"[DEBUG ERROR] Ошибка отправки уведомления: {e}")
+                    logging.error(f"Error notifying user {target_user_id}: {e}")
 
-    elif any(word in text for word in ["не понрав", "dislike", "yoqmadi"]):
+    elif any(word in text for word in ["дизлайк", "dislike", "yoqmadi", "не понрав"]):
         if lang == "uz":
-            await message.answer("💔 Keyingi anketa:")
+            await message.answer("💔 O'tkazib yuborildi.")
         elif lang == "en":
-            await message.answer("💔 Next profile:")
+            await message.answer("💔 Skipped.")
         else:
-            await message.answer("💔 Пропускаем анкету:")
+            await message.answer("💔 Пропущено.")
 
     await show_next_profile(message, state)
-
-
-@dp.message(SearchStates.waiting_for_message)
-async def process_user_message(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    lang = user_data.get("language", "ru")
-    text = message.text
-
-    if (
-        "отменить" in text.lower()
-        or "cancel" in text.lower()
-        or "bekor" in text.lower()
-    ):
-        await state.set_state(SearchStates.browsing)
-        if lang == "uz":
-            await message.answer("Xabar yuborish bekor qilindi.")
-        elif lang == "en":
-            await message.answer("Message sending cancelled.")
-        else:
-            await message.answer("Отправка сообщения отменена.")
-
-        profile = user_data.get("current_profile", {})
-        profile_gender = profile.get("gender", "male")
-        await message.answer(
-            "Продолжаем просмотр:",
-            reply_markup=get_search_control_keyboard(lang, profile_gender),
-        )
-        return
-
-    target_user_id = user_data.get("current_target_uid")
-    if target_user_id:
-        try:
-            my_name = user_data.get("name", "Пользователь")
-            await bot.send_message(
-                target_user_id,
-                f"💌 У вас новое сообщение от пользователя {my_name}:\n\n{text}",
-            )
-        except Exception as e:
-            logging.error(f"Не удалось отправить личное сообщение: {e}")
-
-    if lang == "uz":
-        await message.answer("✅ Xabaringiz egasiga yuborildi!")
-    elif lang == "en":
-        await message.answer("✅ Your message has been sent!")
-    else:
-        await message.answer("✅ Ваше сообщение успешно отправлено!")
-
-    await state.set_state(SearchStates.browsing)
-    profile = user_data.get("current_profile", {})
-    profile_gender = profile.get("gender", "male")
-
-    await message.answer(
-        "Следующая анкета:",
-        reply_markup=get_search_control_keyboard(lang, profile_gender),
-    )
-    await show_next_profile(message, state)
-
-
-@dp.message(Command("profile"))
-async def cmd_profile(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-
-    if user_id in DATABASE:
-        user_data = DATABASE[user_id]
-    else:
-        user_data = await state.get_data()
-
-    if "name" in user_data and "media" in user_data and user_data["media"]:
-        name = user_data.get("name")
-        age = user_data.get("age")
-        city = user_data.get("city", "Ташкент")
-        desc = user_data.get("description")
-        media_list = user_data.get("media", [])
-
-        caption_text = f"{name}, {age}, {city} — {desc}"
-
-        if len(media_list) == 1:
-            m_type, file_id = media_list[0]
-            if m_type == "photo":
-                await message.answer_photo(photo=file_id, caption=caption_text)
-            else:
-                await message.answer_video(video=file_id, caption=caption_text)
-        else:
-            album_builder = []
-            for idx, (m_type, file_id) in enumerate(media_list):
-                if m_type == "photo":
-                    if idx == 0:
-                        album_builder.append(
-                            types.InputMediaPhoto(media=file_id, caption=caption_text)
-                        )
-                    else:
-                        album_builder.append(types.InputMediaPhoto(media=file_id))
-                else:
-                    if idx == 0:
-                        album_builder.append(
-                            types.InputMediaVideo(media=file_id, caption=caption_text)
-                        )
-                    else:
-                        album_builder.append(types.InputMediaVideo(media=file_id))
-            await message.answer_media_group(media=album_builder)
-    else:
-        await message.answer("У вас еще нет созданной анкеты. Нажмите /start")
 
 
 async def main():
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
