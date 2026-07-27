@@ -1,2 +1,1 @@
---only-binary=:all:
-aiogram
+aiogram==3.17.0
