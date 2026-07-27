@@ -1,1 +1,2 @@
+aiogram==3.17.0a--prefer-binary
 aiogram==3.17.0
