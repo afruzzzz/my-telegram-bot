@@ -3,7 +3,9 @@ import logging
 import math
 import os
 import sys
+import json
 import aiohttp
+import asyncpg
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,11 +14,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
-# Токен бота
-TOKEN = "8860695938:AAHlZrF2L7MQg2NGlSxTG4S1sDs3HdaNH60"
-
-# API ключ для проверки NSFW (получите бесплатно на deepai.org или используйте другой сервис)
-DEEPAI_API_KEY = "YOUR_DEEPAI_API_KEY"
+# Токен бота и переменные окружения
+TOKEN = os.getenv("TOKEN", "8860695938:AAHlZrF2L7MQg2NGlSxTG4S1sDs3HdaNH60")
+DEEPAI_API_KEY = os.getenv("DEEPAI_API_KEY", "YOUR_DEEPAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Список Telegram ID администраторов
 ADMIN_IDS = [8918342054]
@@ -26,12 +27,72 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальные структуры данных в памяти:
+# Структуры данных в памяти (дублируются/синхронизируются с PostgreSQL)
 DATABASE = {}
 LIKES = {}  # user_id: set(liked_user_ids)
 INCOMING_LIKES = {}  # user_id: [user_ids who liked them]
-INACTIVE_USERS = set()  # Множество пользователей, которые временно скрыли анкету
+INACTIVE_USERS = set()  # Множество пользователей, временно скрывших анкету
 USER_LANGUAGES = {}  # user_id: lang_code ('ru', 'uz', 'en')
+
+
+# --- РАБОТА С POSTGRESQL ---
+async def init_db():
+    if not DATABASE_URL:
+        logging.warning("DATABASE_URL is not set! Data will only be stored in memory.")
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+                           CREATE TABLE IF NOT EXISTS users
+                           (
+                               user_id
+                               BIGINT
+                               PRIMARY
+                               KEY,
+                               data
+                               JSONB
+                           )
+                           ''')
+        # Загружаем существующих пользователей в оперативную память при старте
+        rows = await conn.fetch('SELECT user_id, data FROM users')
+        for row in rows:
+            DATABASE[row['user_id']] = json.loads(row['data'])
+        await conn.close()
+        logging.info(f"Database initialized successfully. Loaded {len(DATABASE)} users.")
+    except Exception as e:
+        logging.error(f"Database initialization error: {e}")
+
+
+async def save_user_to_db(user_id: int, user_data: dict):
+    DATABASE[user_id] = user_data
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute(
+            '''
+            INSERT INTO users (user_id, data)
+            VALUES ($1, $2) ON CONFLICT (user_id) DO
+            UPDATE SET data = $2
+            ''',
+            user_id, json.dumps(user_data)
+        )
+        await conn.close()
+    except Exception as e:
+        logging.error(f"Error saving user {user_id} to DB: {e}")
+
+
+async def delete_user_from_db(user_id: int):
+    DATABASE.pop(user_id, None)
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('DELETE FROM users WHERE user_id = $1', user_id)
+        await conn.close()
+    except Exception as e:
+        logging.error(f"Error deleting user {user_id} from DB: {e}")
+
 
 # Переводы текстов интерфейса
 TEXTS = {
@@ -258,13 +319,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 
 async def check_image_nsfw(file_url: str) -> bool:
-    """
-    Проверяет изображение на NSFW с помощью DeepAI API.
-    Возвращает True, если контент 18+, и False в противном случае.
-    """
     if DEEPAI_API_KEY == "YOUR_DEEPAI_API_KEY":
         return False
-
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -278,7 +334,6 @@ async def check_image_nsfw(file_url: str) -> bool:
                     return nsfw_score > 0.65
     except Exception as e:
         logging.error(f"NSFW check error: {e}")
-
     return False
 
 
@@ -564,7 +619,7 @@ async def process_rest_menu_actions(message: types.Message, state: FSMContext):
         return
 
     if "удалить" in text or "o'chirish" in text or "delete" in text:
-        DATABASE.pop(user_id, None)
+        await delete_user_from_db(user_id)
         INACTIVE_USERS.discard(user_id)
         LIKES.pop(user_id, None)
         INCOMING_LIKES.pop(user_id, None)
@@ -724,7 +779,9 @@ async def process_preference(message: types.Message, state: FSMContext):
     await state.update_data(preference=pref)
     final_data = await state.get_data()
     final_data["username"] = message.from_user.username
-    DATABASE[user_id] = final_data
+
+    # Сохраняем в БД и память
+    await save_user_to_db(user_id, final_data)
     INACTIVE_USERS.discard(user_id)
 
     await state.set_state(RegistrationStates.active)
@@ -936,10 +993,13 @@ async def web_server():
 
 
 async def main():
+    await init_db()
     add_fake_profiles()
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_broadcast, "interval", hours=8)
     scheduler.start()
+
     asyncio.create_task(web_server())
     logging.info("Starting bot polling & scheduler...")
     await dp.start_polling(bot, drop_pending_updates=True)
