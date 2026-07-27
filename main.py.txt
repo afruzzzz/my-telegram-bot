@@ -1,0 +1,85 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# === ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER В КАТЫЧКАХ ===
+BOT_TOKEN = "8860695938:AAG7aXjkOW3iiin-41jp2gqAeA8e-pGmgn4"
+
+bot = Bot(token=BOT_TOKEN)S
+dp = Dispatcher(storage=MemoryStorage())
+
+# Состояния для регистрации
+class Registration(StatesGroup):
+    language = State()
+    name = State()
+    age = State()
+
+# Клавиатура выбора языка
+lang_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang_uz")],
+    [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")],
+    [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")]
+])
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.set_state(Registration.language)
+    await message.answer(
+        "Привет! Выберите язык / Tilni tanlang / Choose your language:",
+        reply_markup=lang_keyboard
+    )
+
+@dp.callback_query(Registration.language)
+async def process_language(callback: types.CallbackQuery, state: FSMContext):
+    lang = callback.data.split('_')[1]
+    await state.update_data(chosen_language=lang)
+    await state.set_state(Registration.name)
+    
+    prompts = {
+        'ru': "Отлично! Как тебя зовут?",
+        'uz': "Ajoyib! Ismingiz nima?",
+        'en': "Great! What is your name?"
+    }
+    await callback.message.edit_text(prompts.get(lang, prompts['ru']))
+    await callback.answer()
+
+@dp.message(Registration.name)
+async def process_name(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    lang = user_data.get('chosen_language', 'ru')
+    await state.update_data(name=message.text)
+    await state.set_state(Registration.age)
+    
+    prompts = {
+        'ru': f"Приятно познакомиться, {message.text}! Сколько тебе лет?",
+        'uz': f"Tanishganimdan xursandman, {message.text}! Yoshingsiz nechada?",
+        'en': f"Nice to meet you, {message.text}! How old are you?"
+    }
+    await message.answer(prompts.get(lang, prompts['ru']))
+
+@dp.message(Registration.age)
+async def process_age(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    lang = user_data.get('chosen_language', 'ru')
+    name = user_data.get('name')
+    age = message.text
+    
+    prompts = {
+        'ru': f"Супер! Анкета готова:\nИмя: {name}\nВозраст: {age}",
+        'uz': f"Ajoyib! Anketangiz tayyor:\nIsm: {name}\nYosh: {age}",
+        'en': f"Awesome! Profile ready:\nName: {name}\nAge: {age}"
+    }
+    await message.answer(prompts.get(lang, prompts['ru']))
+    await state.clear()
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
