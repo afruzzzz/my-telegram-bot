@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-TOKEN = "8860695938:AAG7aXjkOW3iiin-41jp2gqAeA8e-pGmgn4"
+TOKEN = "8860695938:AAEc71xIojT19bzMBN5W-IcFC12A24h_LAU"
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
