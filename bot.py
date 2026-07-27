@@ -1,38 +1,25 @@
-import http.server
-import os
-import socketserver
-import threading
-
-PORT = int(os.environ.get("PORT", 10000))
-
-
-class SimpleHandler(http.server.SimpleHTTPRequestHandler):
-
-  def do_GET(self):
-    self.send_response(200)
-    self.end_headers()
-    self.wfile.write(b"Bot is alive!")
-
-
-def run_server():
-  with socketserver.TCPServer(("0.0.0.0", PORT), SimpleHandler) as httpd:
-    httpd.serve_forever()
-
-
-server_thread = threading.Thread(target=run_server, daemon=True)
-server_thread.start()
-
 import asyncio
 import logging
+import math
+import os
 import sys
+import aiohttp
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
-# Безопасно считываем токен для Render, а для локального теста прописан токен ниже
-TOKEN = os.getenv("BOT_TOKEN") or "8860695938:AAHlZrF2L7MQg2NGlSxTG4S1sDs3HdaNH60"
+# Токен бота
+TOKEN = "8860695938:AAHlZrF2L7MQg2NGlSxTG4S1sDs3HdaNH60"
+
+# API ключ для проверки NSFW (получите бесплатно на deepai.org или используйте другой сервис)
+DEEPAI_API_KEY = "YOUR_DEEPAI_API_KEY"
+
+# Список Telegram ID администраторов
+ADMIN_IDS = [8918342054]
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -43,963 +30,920 @@ dp = Dispatcher(storage=MemoryStorage())
 DATABASE = {}
 LIKES = {}  # user_id: set(liked_user_ids)
 INCOMING_LIKES = {}  # user_id: [user_ids who liked them]
+INACTIVE_USERS = set()  # Множество пользователей, которые временно скрыли анкету
+USER_LANGUAGES = {}  # user_id: lang_code ('ru', 'uz', 'en')
+
+# Переводы текстов интерфейса
+TEXTS = {
+    "ru": {
+        "welcome": "👋 Привет! Добро пожаловать в бот знакомств.\n\nЗдесь вы сможете найти интересных людей рядом с вами, общаться и заводить новые знакомства.",
+        "choose_lang": "🌐 Пожалуйста, выберите язык / Iltimos, tilni tanlang / Please choose your language:",
+        "btn_ru": "🇷🇺 Русский",
+        "btn_uz": "🇺🇿 O'zbekcha",
+        "btn_en": "🇬🇧 English",
+        "create_profile": "📝 Создать свою анкету",
+        "edit_profile": "✏️ Изменить анкету",
+        "search_profiles": "🔍 Искать анкеты",
+        "continue_search": "🔍 Продолжить поиск",
+        "rest": "🛌 Отдохнуть",
+        "return_search": "🟢 Вернуться в поиск",
+        "hide_profile": "👁️‍🗨️ Временно скрыть мою анкету",
+        "delete_profile": "🗑️ Полностью удалить анкету",
+        "back": "🔙 Назад",
+        "name_prompt": "1️⃣ Как вас зовут? Введите ваше имя:",
+        "name_cmd_error": "Команды не принимаются. Пожалуйста, введите ваше имя:",
+        "age_prompt": "2️⃣ Сколько вам лет? (Введите число, например: 20):",
+        "age_cmd_error": "Команды не принимаются. Пожалуйста, введите ваш возраст цифрами:",
+        "age_error_digit": "Пожалуйста, введите возраст цифрами:",
+        "age_error_range": "Возраст должен быть от 16 до 70 лет:",
+        "location_prompt": "3️⃣ Пожалуйста, отправьте вашу локацию:",
+        "location_btn": "📍 Отправить локацию",
+        "location_fallback": "Пожалуйста, отправьте локацию с помощью кнопки 📍",
+        "desc_prompt": "4️⃣ Расскажите немного о себе:",
+        "desc_cmd_error": "Команды не принимаются. Пожалуйста, расскажите немного о себе:",
+        "media_prompt": "5️⃣ Отправьте от 1 до 3 фото или видео. Напишите **Готово**, когда закончите.",
+        "media_error": "Пожалуйста, отправьте хотя бы одно фото или видео!",
+        "media_type_error": "Пожалуйста, отправьте фото/видео или напишите «Готово».",
+        "nsfw_error": "⚠️ На фото обнаружен контент 18+ (NSFW). Пожалуйста, загрузите другую фотографию.",
+        "media_saved": "Принято! Можете отправить еще {remaining} файл(а) или написать **Готово**.",
+        "gender_prompt": "Выберите ваш пол:",
+        "btn_male": "👨 Я парень",
+        "btn_female": "👩 Я девушка",
+        "gender_error": "Пожалуйста, выберите вариант с помощью кнопок!",
+        "preference_prompt": "Кто тебе интересен?",
+        "btn_pref_male": "👨 Парни",
+        "btn_pref_female": "👩 Девушки",
+        "btn_pref_all": "🌐 Все",
+        "registration_done": "🎉 Все готово! Нажми кнопку ниже, чтобы начать поиск людей:",
+        "no_profile": "Сначала создайте свою анкету!",
+        "profile_hidden": "⚠️ Ваша анкета скрыта. Верните ее в активный режим через меню.",
+        "search_started": "🔍 Поиск запущен!",
+        "no_more_profiles": "Вы посмотрели все доступные анкеты!",
+        "cancel": "❌ Отменить",
+        "msg_cancelled": "Отправка сообщения отменена.",
+        "msg_sent": "✅ Ваше сообщение и лайк успешно отправлены!",
+        "write_msg_prompt": "Напишите текст сообщения:",
+        "search_stopped": "Поиск завершен.",
+        "like": "❤️ Лайк",
+        "dislike": "💔 Не нравится",
+        "leave_msg": "💌 Оставить сообщение",
+        "stop_search": "🛑 Остановить поиск",
+        "match_text": "🎉 Взаимная симпатия! Вот контакт:",
+        "contact_visible": "🔗 Контакт: @{username}",
+        "contact_hidden": "🔗 Контакт: Скрыт (нет юзернейма)",
+        "rest_menu": "🛌 Меню отдыха. Выберите, что вы хотите сделать:",
+        "profile_activated": "🟢 Ваша анкета снова активна! Открываю поиск...",
+        "profile_hided": "👁️‍🗨️ Анкета временно скрыта. Чтобы снова искать людей, нажмите кнопку активации.",
+        "profile_deleted": "🗑️ Ваша анкета удалена. Чтобы начать заново, введите /start.",
+        "menu_fallback": "Пожалуйста, используйте кнопки меню:",
+        "admin_no_rights": "У вас нет прав для использования этой команды.",
+        "no_users": "В базе пока нет зарегистрированных пользователей.",
+        "users_list": "📋 Список зарегистрированных пользователей:\n\n"
+    },
+    "uz": {
+        "welcome": "👋 Salom! Tanishuv botiga xush kelibsiz.\n\nBu yerda siz o'zingizga yaqin bo'lgan qiziqarli odamlarni topishingiz, muloqot qilishingiz va yangi tanishuvlar orttirishingiz mumkin.",
+        "choose_lang": "🌐 Iltimos, tilni tanlang / Пожалуйста, выберите язык / Please choose your language:",
+        "btn_ru": "🇷🇺 Русский",
+        "btn_uz": "🇺🇿 O'zbekcha",
+        "btn_en": "🇬🇧 English",
+        "create_profile": "📝 O'z anketangizni yaratish",
+        "edit_profile": "✏️ Anketani o'zgartirish",
+        "search_profiles": "🔍 Anketalarni qidirish",
+        "continue_search": "🔍 Qidirishni davom ettirish",
+        "rest": "🛌 Dam olish",
+        "return_search": "🟢 Qidirishga qaytish",
+        "hide_profile": "👁️‍🗨️ Anketamni vaqtincha yashirish",
+        "delete_profile": "🗑️ Anketani to'liq o'chirish",
+        "back": "🔙 Orqaga",
+        "name_prompt": "1️⃣ Ismingiz nima? Ismingizni kiriting:",
+        "name_cmd_error": "Buyruqlar qabul qilinmaydi. Iltimos, ismingizni kiriting:",
+        "age_prompt": "2️⃣ Yoshingiz nechada? (Raqamda kiriting, masalan: 20):",
+        "age_cmd_error": "Buyruqlar qabul qilinmaydi. Iltimos, yoshingizni raqamlar bilan kiriting:",
+        "age_error_digit": "Iltimos, yoshni raqamlar bilan kiriting:",
+        "age_error_range": "Yosh 16 dan 70 gacha bo'lishi kerak:",
+        "location_prompt": "3️⃣ Iltimos, manzilingizni yuboring:",
+        "location_btn": "📍 Manzilni yuborish",
+        "location_fallback": "Iltimos, 📍 tugmasi yordamida manzilingizni yuboring",
+        "desc_prompt": "4️⃣ O'zingiz haqingizda qisqacha yozing:",
+        "desc_cmd_error": "Buyruqlar qabul qilinmaydi. Iltimos, o'zingiz haqingizda qisqacha yozing:",
+        "media_prompt": "5️⃣ 1 tadan 3 tagacha rasm yoki video yuboring. Tugatgach, **Tayyor** deb yozing.",
+        "media_error": "Iltimos, kamida bitta rasm yoki video yuboring!",
+        "media_type_error": "Iltimos, rasm/video yuboring yoki «Tayyor» deb yozing.",
+        "nsfw_error": "⚠️ Suratda 18+ (NSFW) kontent aniqlandi. Iltimos, boshqa surat yuklang.",
+        "media_saved": "Qabul qilindi! Yana {remaining} ta fayl yuborishingiz mumkin yoki **Tayyor** deb yozing.",
+        "gender_prompt": "Jinsingizni tanlang:",
+        "btn_male": "👨 Men yigitman",
+        "btn_female": "👩 Men qizman",
+        "gender_error": "Iltimos, tugmalar yordamida tanlang!",
+        "preference_prompt": "Kimlar sizni qiziqtiradi?",
+        "btn_pref_male": "👨 Yigitlar",
+        "btn_pref_female": "👩 Qizlar",
+        "btn_pref_all": "🌐 Barchasi",
+        "registration_done": "🎉 Hammasi tayyor! Odamlarni qidirishni boshlash uchun quyidagi tugmani bosing:",
+        "no_profile": "Avval o'z anketangizni yarating!",
+        "profile_hidden": "⚠️ Anketangiz yashirilgan. Uni menyu orqali faol holatga qaytaring.",
+        "search_started": "🔍 Qidiruv boshlandi!",
+        "no_more_profiles": "Siz barcha mavjud anketalarni ko'rib chiqdingiz!",
+        "cancel": "❌ Bekor qilish",
+        "msg_cancelled": "Xabar yuborish bekor qilindi.",
+        "msg_sent": "✅ Xabaringiz va laykingiz muvaffaqiyatli yuborildi!",
+        "write_msg_prompt": "Xabar matnini yozing:",
+        "search_stopped": "Qidiruv yakunlandi.",
+        "like": "❤️ Layk",
+        "dislike": "💔 Yoqmadi",
+        "leave_msg": "💌 Xabar qoldirish",
+        "stop_search": "🛑 Qidiruvni to'xtatish",
+        "match_text": "🎉 O'zaro simpatiya! Mana kontakt:",
+        "contact_visible": "🔗 Kontakt: @{username}",
+        "contact_hidden": "🔗 Kontakt: Yashiringan (username yo'q)",
+        "rest_menu": "🛌 Dam olish menyusi. Nima qilmoqchisiz?",
+        "profile_activated": "🟢 Anketangiz yana faol! Qidiruvni ochyapman...",
+        "profile_hided": "👁️‍🗨️ Anketa vaqtincha yashirildi. Odamlarni qayta qidirish uchun faollashtirish tugmasini bosing.",
+        "profile_deleted": "🗑️ Anketangiz o'chirildi. Qaytadan boshlash uchun /start yuboring.",
+        "menu_fallback": "Iltimos, menyu tugmalaridan foydalaning:",
+        "admin_no_rights": "Bu buyruqdan foydalanishga huquqingiz yo'q.",
+        "no_users": "Bazada hali ro'yxatdan o'tgan foydalanuvchilar yo'q.",
+        "users_list": "📋 Ro'yxatdan o'tgan foydalanuvchilar ro'yxati:\n\n"
+    },
+    "en": {
+        "welcome": "👋 Hello! Welcome to the dating bot.\n\nHere you can find interesting people near you, chat, and make new connections.",
+        "choose_lang": "🌐 Please choose your language / Пожалуйста, выберите язык / Iltimos, tilni tanlang:",
+        "btn_ru": "🇷🇺 Русский",
+        "btn_uz": "🇺🇿 O'zbekcha",
+        "btn_en": "🇬🇧 English",
+        "create_profile": "📝 Create profile",
+        "edit_profile": "✏️ Edit profile",
+        "search_profiles": "🔍 Search profiles",
+        "continue_search": "🔍 Continue search",
+        "rest": "🛌 Take a rest",
+        "return_search": "🟢 Return to search",
+        "hide_profile": "👁️‍🗨️ Hide my profile temporarily",
+        "delete_profile": "🗑️ Delete profile completely",
+        "back": "🔙 Back",
+        "name_prompt": "1️⃣ What is your name? Enter your name:",
+        "name_cmd_error": "Commands are not accepted. Please enter your name:",
+        "age_prompt": "2️⃣ How old are you? (Enter a number, e.g., 20):",
+        "age_cmd_error": "Commands are not accepted. Please enter your age using numbers:",
+        "age_error_digit": "Please enter your age using numbers:",
+        "age_error_range": "Age must be between 16 and 70 years:",
+        "location_prompt": "3️⃣ Please send your location:",
+        "location_btn": "📍 Send location",
+        "location_fallback": "Please send your location using the 📍 button",
+        "desc_prompt": "4️⃣ Tell us a little about yourself:",
+        "desc_cmd_error": "Commands are not accepted. Please tell us a little about yourself:",
+        "media_prompt": "5️⃣ Send 1 to 3 photos or videos. Type **Done** when finished.",
+        "media_error": "Please send at least one photo or video!",
+        "media_type_error": "Please send a photo/video or type «Done».",
+        "nsfw_error": "⚠️ 18+ (NSFW) content detected in the photo. Please upload another picture.",
+        "media_saved": "Accepted! You can send {remaining} more file(s) or type **Done**.",
+        "gender_prompt": "Select your gender:",
+        "btn_male": "👨 I am a guy",
+        "btn_female": "👩 I am a girl",
+        "gender_error": "Please select an option using the buttons!",
+        "preference_prompt": "Who are you interested in?",
+        "btn_pref_male": "👨 Guys",
+        "btn_pref_female": "👩 Girls",
+        "btn_pref_all": "🌐 Everyone",
+        "registration_done": "🎉 All set! Click the button below to start searching for people:",
+        "no_profile": "Please create your profile first!",
+        "profile_hidden": "⚠️ Your profile is hidden. Unhide it through the menu.",
+        "search_started": "🔍 Search started!",
+        "no_more_profiles": "You have viewed all available profiles!",
+        "cancel": "❌ Cancel",
+        "msg_cancelled": "Message sending cancelled.",
+        "msg_sent": "✅ Your message and like have been successfully sent!",
+        "write_msg_prompt": "Write your message text:",
+        "search_stopped": "Search finished.",
+        "like": "❤️ Like",
+        "dislike": "💔 Dislike",
+        "leave_msg": "💌 Leave a message",
+        "stop_search": "🛑 Stop search",
+        "match_text": "🎉 Mutual match! Here is the contact:",
+        "contact_visible": "🔗 Contact: @{username}",
+        "contact_hidden": "🔗 Contact: Hidden (no username)",
+        "rest_menu": "🛌 Rest menu. Choose what you want to do:",
+        "profile_activated": "🟢 Your profile is active again! Opening search...",
+        "profile_hided": "👁️‍🗨️ Profile temporarily hidden. To search again, press the activation button.",
+        "profile_deleted": "🗑️ Your profile has been deleted. To start over, send /start.",
+        "menu_fallback": "Please use the menu buttons:",
+        "admin_no_rights": "You do not have rights to use this command.",
+        "no_users": "There are no registered users in the database yet.",
+        "users_list": "📋 List of registered users:\n\n"
+    }
+}
+
+
+def get_t(user_id: int, key: str) -> str:
+    lang = USER_LANGUAGES.get(user_id, "ru")
+    return TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, key))
+
+
+AD_TEXT = (
+    "🔥 **Новая платформа знакомств!**\n\n"
+    "🌐 Не пропускай обновления! Подписывайся на наш официальный Telegram-канал, чтобы быть в курсе всех новостей.\n"
+    "👉 **Подписаться:** https://t.me/kompashki_daily"
+)
+
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+        return None
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    return round(R * c)
+
+
+async def check_image_nsfw(file_url: str) -> bool:
+    """
+    Проверяет изображение на NSFW с помощью DeepAI API.
+    Возвращает True, если контент 18+, и False в противном случае.
+    """
+    if DEEPAI_API_KEY == "YOUR_DEEPAI_API_KEY":
+        return False
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    "https://api.deepai.org/api/nsfw-detector",
+                    data={'image': file_url},
+                    headers={'api-key': DEEPAI_API_KEY}
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    nsfw_score = result.get("output", {}).get("nsfw_score", 0.0)
+                    return nsfw_score > 0.65
+    except Exception as e:
+        logging.error(f"NSFW check error: {e}")
+
+    return False
+
+
+def add_fake_profiles():
+    fake_users = {
+        1001: {
+            "name": "Алина",
+            "age": 20,
+            "city": "Ташкент",
+            "latitude": 41.2995,
+            "longitude": 69.2401,
+            "description": "Привет! Ищу новых друзей для прогулок и общения ✨",
+            "media": [("photo",
+                       "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=600&auto=format&fit=crop&q=80")],
+            "gender": "female",
+            "preference": "all",
+            "username": "alina_demo"
+        },
+        1002: {
+            "name": "Тимур",
+            "age": 22,
+            "city": "Ташкент",
+            "latitude": 41.3111,
+            "longitude": 69.2797,
+            "description": "Студент, увлекаюсь музыкой и IT. Давайте общаться! 🎧",
+            "media": [("photo",
+                       "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=600&auto=format&fit=crop&q=80")],
+            "gender": "male",
+            "preference": "all",
+            "username": "timur_demo"
+        }
+    }
+    for uid, data in fake_users.items():
+        if uid not in DATABASE:
+            DATABASE[uid] = data
+
+
+async def send_broadcast():
+    if not DATABASE:
+        return
+    for user_id in list(DATABASE.keys()):
+        if 1000 <= user_id <= 2000:
+            continue
+        try:
+            await bot.send_message(chat_id=user_id, text=AD_TEXT, parse_mode="Markdown")
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logging.error(f"Failed broadcast to {user_id}: {e}")
 
 
 class RegistrationStates(StatesGroup):
-  waiting_for_language = State()
-  waiting_for_name = State()
-  waiting_for_age = State()
-  waiting_for_location = State()
-  waiting_for_description = State()
-  waiting_for_media = State()
-  waiting_for_gender = State()
-  waiting_for_preference = State()
-  active = State()
+    waiting_for_language = State()
+    waiting_for_name = State()
+    waiting_for_age = State()
+    waiting_for_location = State()
+    waiting_for_description = State()
+    waiting_for_media = State()
+    waiting_for_gender = State()
+    waiting_for_preference = State()
+    active = State()
 
 
 class SearchStates(StatesGroup):
-  browsing = State()
-  waiting_for_message = State()
+    browsing = State()
+    waiting_for_message = State()
+
+
+class RestStates(StatesGroup):
+    menu = State()
 
 
 def get_language_keyboard():
-  return types.InlineKeyboardMarkup(
-      inline_keyboard=[
-          [
-              types.InlineKeyboardButton(
-                  text="🇷🇺 Русский", callback_data="lang_ru"
-              ),
-              types.InlineKeyboardButton(
-                  text="🇺🇿 O'zbekcha", callback_data="lang_uz"
-              ),
-          ],
-          [types.InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")],
-      ]
-  )
-
-
-def get_gender_reply_keyboard(lang):
-  if lang == "uz":
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [
-                types.KeyboardButton(text="👨 Yigitman"),
-                types.KeyboardButton(text="👩 Qizman"),
-            ]
+            [types.KeyboardButton(text="🇷🇺 Русский"), types.KeyboardButton(text="🇺🇿 O'zbekcha")],
+            [types.KeyboardButton(text="🇬🇧 English")]
         ],
         resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-  elif lang == "en":
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                types.KeyboardButton(text="👨 I'm a guy"),
-                types.KeyboardButton(text="👩 I'm a girl"),
-            ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-  else:
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                types.KeyboardButton(text="👨 Я парень"),
-                types.KeyboardButton(text="👩 Я девушка"),
-            ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
+        one_time_keyboard=True
     )
 
 
-def get_preference_reply_keyboard(lang):
-  if lang == "uz":
+def get_main_menu_keyboard(user_id=None):
+    has_profile = user_id is not None and user_id in DATABASE
+    is_resting = user_id in INACTIVE_USERS
+
+    if not has_profile:
+        return types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text=get_t(user_id, "create_profile"))]],
+            resize_keyboard=True
+        )
+
+    profile_btn = get_t(user_id, "edit_profile")
+    search_btn = get_t(user_id, "search_profiles") if not is_resting else get_t(user_id, "continue_search")
+    rest_btn = get_t(user_id, "rest") if not is_resting else get_t(user_id, "return_search")
+
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [
-                types.KeyboardButton(text="👨 Yigitlar"),
-                types.KeyboardButton(text="👩 Qizlar"),
-            ],
-            [types.KeyboardButton(text="🌐 Farqi yo'q (Barchasi)")],
+            [types.KeyboardButton(text=profile_btn), types.KeyboardButton(text=search_btn)],
+            [types.KeyboardButton(text=rest_btn)]
         ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-  elif lang == "en":
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                types.KeyboardButton(text="👨 Guys"),
-                types.KeyboardButton(text="👩 Girls"),
-            ],
-            [types.KeyboardButton(text="🌐 Everyone")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-  else:
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                types.KeyboardButton(text="👨 Парни"),
-                types.KeyboardButton(text="👩 Девушки"),
-            ],
-            [types.KeyboardButton(text="🌐 Все")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
+        resize_keyboard=True
     )
 
 
-def get_profile_reply_keyboard(lang):
-  if lang == "uz":
-    btn_text = "📝 Anketani yaratish"
-  elif lang == "en":
-    btn_text = "📝 Create profile"
-  else:
-    btn_text = "📝 Создать свою анкету"
-
-  return types.ReplyKeyboardMarkup(
-      keyboard=[[types.KeyboardButton(text=btn_text)]],
-      resize_keyboard=True,
-      is_persistent=True,
-  )
+def get_rest_menu_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text=get_t(user_id, "hide_profile"))],
+            [types.KeyboardButton(text=get_t(user_id, "delete_profile"))],
+            [types.KeyboardButton(text=get_t(user_id, "back"))]
+        ],
+        resize_keyboard=True
+    )
 
 
-def get_location_keyboard(lang):
-  if lang == "uz":
-    btn_text = "📍 Joylashuvni yuborish"
-  elif lang == "en":
-    btn_text = "📍 Send location"
-  else:
-    btn_text = "📍 Отправить локацию"
-
-  return types.ReplyKeyboardMarkup(
-      keyboard=[[types.KeyboardButton(text=btn_text, request_location=True)]],
-      resize_keyboard=True,
-      one_time_keyboard=True,
-  )
+def get_gender_reply_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=get_t(user_id, "btn_male")),
+                   types.KeyboardButton(text=get_t(user_id, "btn_female"))]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
 
 
-def get_search_control_keyboard(lang, profile_gender):
-  is_female = profile_gender == "female"
+def get_preference_reply_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text=get_t(user_id, "btn_pref_male")),
+             types.KeyboardButton(text=get_t(user_id, "btn_pref_female"))],
+            [types.KeyboardButton(text=get_t(user_id, "btn_pref_all"))]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
 
-  if lang == "uz":
-    like_text = "❤️ Yoqdi (Qiz)" if is_female else "❤️ Yoqdi (Yigit)"
-    dislike_text = "💔 Yoqmadi"
-    msg_text = "💌 Xabar qoldirish"
-    stop_text = "🛑 Qidiruvni to'xtatish"
-  elif lang == "en":
-    like_text = "❤️ Like"
-    dislike_text = "💔 Dislike"
-    msg_text = "💌 Leave message"
-    stop_text = "🛑 Stop search"
-  else:
-    if is_female:
-      like_text = "❤️ Понравилась"
-      dislike_text = "💔 Не понравилась"
+
+def get_location_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=get_t(user_id, "location_btn"), request_location=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+def get_search_control_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text=get_t(user_id, "like")), types.KeyboardButton(text=get_t(user_id, "dislike"))],
+            [types.KeyboardButton(text=get_t(user_id, "leave_msg")),
+             types.KeyboardButton(text=get_t(user_id, "stop_search"))]
+        ],
+        resize_keyboard=True
+    )
+
+
+def get_cancel_message_keyboard(user_id=None):
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=get_t(user_id, "cancel"))]],
+        resize_keyboard=True
+    )
+
+
+async def send_profile_to_user(recipient_id: int, profile_data: dict, intro_text: str):
+    name = profile_data.get("name")
+    age = profile_data.get("age")
+    city = profile_data.get("city", "Ташкент")
+    desc = profile_data.get("description")
+    username = profile_data.get("username")
+
+    if username:
+        caption_text = f"{intro_text}\n\n{name}, {age}, {city} — {desc}\n\n{get_t(recipient_id, 'contact_visible').format(username=username)}"
     else:
-      like_text = "❤️ Понравился"
-      dislike_text = "💔 Не понравился"
-    msg_text = "💌 Оставить сообщение"
-    stop_text = "🛑 Остановить поиск"
+        caption_text = f"{intro_text}\n\n{name}, {age}, {city} — {desc}\n\n{get_t(recipient_id, 'contact_hidden')}"
 
-  return types.ReplyKeyboardMarkup(
-      keyboard=[
-          [
-              types.KeyboardButton(text=like_text),
-              types.KeyboardButton(text=dislike_text),
-          ],
-          [types.KeyboardButton(text=msg_text)],
-          [types.KeyboardButton(text=stop_text)],
-      ],
-      resize_keyboard=True,
-  )
-
-
-def get_cancel_message_keyboard(lang):
-  if lang == "uz":
-    return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Bekor qilish")]],
-        resize_keyboard=True,
-    )
-  elif lang == "en":
-    return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Cancel")]], resize_keyboard=True
-    )
-  else:
-    return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="❌ Отменить")]], resize_keyboard=True
-    )
-
-
-async def send_profile_to_user(
-    recipient_id: int, profile_data: dict, intro_text: str
-):
-  name = profile_data.get("name")
-  age = profile_data.get("age")
-  city = profile_data.get("city", "Ташкент")
-  desc = profile_data.get("description")
-  media_list = profile_data.get("media", [])
-  username = profile_data.get("username")
-
-  if username:
-    caption_text = (
-        f"{intro_text}\n\n{name}, {age}, {city} —"
-        f" {desc}\n\n🔗 Контакт: @{username}"
-    )
-  else:
-    caption_text = (
-        f"{intro_text}\n\n{name}, {age}, {city} — {desc}\n\n🔗 Контакт: Скрыт"
-        " (нет юзернейма)"
-    )
-
-  try:
-    if len(media_list) == 1:
-      m_type, file_id = media_list[0]
-      if m_type == "photo":
-        await bot.send_photo(
-            chat_id=recipient_id, photo=file_id, caption=caption_text
-        )
-      else:
-        await bot.send_video(
-            chat_id=recipient_id, video=file_id, caption=caption_text
-        )
-    elif len(media_list) > 1:
-      album_builder = []
-      for idx, (m_type, file_id) in enumerate(media_list):
-        if m_type == "photo":
-          if idx == 0:
-            album_builder.append(
-                types.InputMediaPhoto(media=file_id, caption=caption_text)
-            )
-          else:
-            album_builder.append(types.InputMediaPhoto(media=file_id))
+    try:
+        media_list = profile_data.get("media", [])
+        if len(media_list) == 1:
+            m_type, file_id = media_list[0]
+            if m_type == "photo":
+                await bot.send_photo(chat_id=recipient_id, photo=file_id, caption=caption_text)
+            else:
+                await bot.send_video(chat_id=recipient_id, video=file_id, caption=caption_text)
+        elif len(media_list) > 1:
+            album_builder = []
+            for idx, (m_type, file_id) in enumerate(media_list):
+                if m_type == "photo":
+                    album_builder.append(types.InputMediaPhoto(media=file_id, caption=caption_text if idx == 0 else ""))
+                else:
+                    album_builder.append(types.InputMediaVideo(media=file_id, caption=caption_text if idx == 0 else ""))
+            await bot.send_media_group(chat_id=recipient_id, media=album_builder)
         else:
-          if idx == 0:
-            album_builder.append(
-                types.InputMediaVideo(media=file_id, caption=caption_text)
-            )
-          else:
-            album_builder.append(types.InputMediaVideo(media=file_id))
-      await bot.send_media_group(chat_id=recipient_id, media=album_builder)
-    else:
-      await bot.send_message(chat_id=recipient_id, text=caption_text)
-  except Exception as e:
-    logging.error(f"Error sending profile to {recipient_id}: {e}")
+            await bot.send_message(chat_id=recipient_id, text=caption_text)
+    except Exception as e:
+        logging.error(f"Error sending profile: {e}")
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-  await state.clear()
-  await state.set_state(RegistrationStates.waiting_for_language)
-  await message.answer(
-      "Привет! Пожалуйста, выберите язык:\nTilni tanlang:\nPlease choose your"
-      " language:",
-      reply_markup=get_language_keyboard(),
-  )
+    await state.clear()
+    user_id = message.from_user.id
+    await state.set_state(RegistrationStates.waiting_for_language)
+    await message.answer(TEXTS["ru"]["choose_lang"], reply_markup=get_language_keyboard())
 
 
-@dp.message(Command("language"))
-async def cmd_language(message: types.Message, state: FSMContext):
-  await state.set_state(RegistrationStates.waiting_for_language)
-  await message.answer(
-      "Выберите язык / Tilni tanlang / Choose language:",
-      reply_markup=types.ReplyKeyboardRemove(),
-  )
-  await message.answer(
-      "⬇️ Выберите язык ниже:", reply_markup=get_language_keyboard()
-  )
+@dp.message(RegistrationStates.waiting_for_language)
+async def process_language_selection(message: types.Message, state: FSMContext):
+    text = message.text
+    user_id = message.from_user.id
+
+    if "русский" in text.lower():
+        USER_LANGUAGES[user_id] = "ru"
+    elif "o'zbekcha" in text.lower() or "узбекский" in text.lower():
+        USER_LANGUAGES[user_id] = "uz"
+    elif "english" in text.lower():
+        USER_LANGUAGES[user_id] = "en"
+    else:
+        USER_LANGUAGES[user_id] = "ru"
+
+    welcome_text = get_t(user_id, "welcome")
+    await message.answer(welcome_text, reply_markup=get_main_menu_keyboard(user_id))
+    await state.set_state(RegistrationStates.active)
 
 
-@dp.callback_query(F.data.startswith("lang_"))
-async def process_language(callback: types.CallbackQuery, state: FSMContext):
-  lang = callback.data.split("_")[1]
-  await state.update_data(language=lang)
+@dp.message(Command("usernames"))
+async def cmd_get_usernames(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer(get_t(user_id, "admin_no_rights"))
+        return
 
-  if lang == "ru":
-    text = (
-        "Новая платформа знакомств в Узбекистане 🔥\nУспей найти своих"
-        " компашек 💁\n\nДавай начнем! Нажми кнопку внизу, чтобы создать"
-        " анкету."
-    )
-  elif lang == "uz":
-    text = (
-        "O'zbekistonda yangi tanishuv platformasi 🔥\nO'z kompaniyangizni"
-        " topishga shoshiling 💁\n\nBoshladik! Anketani yaratish uchun"
-        " pastdagi tugmani bosing."
-    )
-  elif lang == "en":
-    text = (
-        "New dating platform in Uzbekistan 🔥\nHurry up to find your company"
-        " 💁\n\nLet's start! Click the button below to create your profile."
-    )
-  else:
-    text = "Language selected!"
+    usernames = []
+    for uid, data in DATABASE.items():
+        username = data.get("username")
+        name = data.get("name", "Без имени")
+        if username:
+            usernames.append(f"@{username} (ID: {uid}, Имя: {name})")
+        else:
+            usernames.append(f"Без юзернейма (ID: {uid}, Имя: {name})")
 
-  await callback.message.answer(
-      text, reply_markup=get_profile_reply_keyboard(lang)
-  )
-  await callback.answer()
+    if not usernames:
+        await message.answer(get_t(user_id, "no_users"))
+        return
+
+    response_text = get_t(user_id, "users_list") + "\n".join(usernames)
+    await message.answer(response_text[:4000])
 
 
-@dp.message(
-    F.text.in_(
-        ["📝 Создать свою анкету", "📝 Anketani yaratish", "📝 Create profile"]
-    )
-)
-async def process_create_profile(message: types.Message, state: FSMContext):
-  await state.set_state(RegistrationStates.waiting_for_name)
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
+@dp.message(F.text.in_([
+    "🛌 Отдохнуть", "🟢 Вернуться в поиск",
+    "🛌 Dam olish", "🟢 Qidirishga qaytish",
+    "🛌 Take a rest", "🟢 Return to search"
+]))
+async def process_rest_button(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id not in DATABASE:
+        await message.answer(get_t(user_id, "no_profile"))
+        return
 
-  if lang == "uz":
-    await message.answer(
-        "1️⃣ Ismingizni kiriting:", reply_markup=types.ReplyKeyboardRemove()
-    )
-  elif lang == "en":
-    await message.answer(
-        "1️⃣ Please enter your name:", reply_markup=types.ReplyKeyboardRemove()
-    )
-  else:
-    await message.answer(
-        "1️⃣ Как вас зовут? Введите ваше имя:",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
+    if user_id in INACTIVE_USERS:
+        INACTIVE_USERS.remove(user_id)
+        await message.answer(get_t(user_id, "profile_activated"), reply_markup=get_main_menu_keyboard(user_id))
+        await cmd_search(message, state)
+    else:
+        await state.set_state(RestStates.menu)
+        await message.answer(get_t(user_id, "rest_menu"), reply_markup=get_rest_menu_keyboard(user_id))
+
+
+@dp.message(RestStates.menu)
+async def process_rest_menu_actions(message: types.Message, state: FSMContext):
+    text = message.text.lower()
+    user_id = message.from_user.id
+
+    if "назад" in text or "orqaga" in text or "back" in text:
+        await state.set_state(RegistrationStates.active)
+        await message.answer("Menu:", reply_markup=get_main_menu_keyboard(user_id))
+        return
+
+    if "скрыть" in text or "yashirish" in text or "hide" in text:
+        INACTIVE_USERS.add(user_id)
+        await state.set_state(RegistrationStates.active)
+        await message.answer(get_t(user_id, "profile_hided"), reply_markup=get_main_menu_keyboard(user_id))
+        return
+
+    if "удалить" in text or "o'chirish" in text or "delete" in text:
+        DATABASE.pop(user_id, None)
+        INACTIVE_USERS.discard(user_id)
+        LIKES.pop(user_id, None)
+        INCOMING_LIKES.pop(user_id, None)
+        await state.clear()
+        await message.answer(get_t(user_id, "profile_deleted"), reply_markup=types.ReplyKeyboardRemove())
+        return
+
+    await message.answer(get_t(user_id, "menu_fallback"), reply_markup=get_rest_menu_keyboard(user_id))
+
+
+@dp.message(F.text.in_([
+    "📝 Создать свою анкету", "✏️ Изменить анкету",
+    "📝 O'z anketangizni yaratish", "✏️ Anketani o'zgartirish",
+    "📝 Create profile", "✏️ Edit profile"
+]))
+async def process_create_or_edit_profile(message: types.Message, state: FSMContext):
+    await state.set_state(RegistrationStates.waiting_for_name)
+    user_id = message.from_user.id
+    await message.answer(get_t(user_id, "name_prompt"), reply_markup=types.ReplyKeyboardRemove())
 
 
 @dp.message(RegistrationStates.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
-  await state.update_data(name=message.text)
-  await state.set_state(RegistrationStates.waiting_for_age)
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  if lang == "uz":
-    await message.answer("2️⃣ Yoshingiz nechida? (Masalan: 20):")
-  elif lang == "en":
-    await message.answer("2️⃣ How old are you? (e.g. 20):")
-  else:
-    await message.answer("2️⃣ Сколько вам лет? (Введите число, например: 20):")
+    user_id = message.from_user.id
+    if message.text and message.text.startswith('/'):
+        await message.answer(get_t(user_id, "name_cmd_error"))
+        return
+    await state.update_data(name=message.text)
+    await state.set_state(RegistrationStates.waiting_for_age)
+    await message.answer(get_t(user_id, "age_prompt"))
 
 
 @dp.message(RegistrationStates.waiting_for_age)
 async def process_age(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
+    user_id = message.from_user.id
+    if message.text and message.text.startswith('/'):
+        await message.answer(get_t(user_id, "age_cmd_error"))
+        return
+    if not message.text.isdigit():
+        await message.answer(get_t(user_id, "age_error_digit"))
+        return
 
-  if not message.text.isdigit():
-    if lang == "uz":
-      await message.answer(
-          "Iltimos, yoshingizni faqat raqamlarda kiriting (masalan: 20):"
-      )
-    elif lang == "en":
-      await message.answer("Please enter your age using numbers only (e.g. 20):")
-    else:
-      await message.answer("Пожалуйста, введите возраст цифрами (например: 20):")
-    return
+    age = int(message.text)
+    if not (16 <= age <= 70):
+        await message.answer(get_t(user_id, "age_error_range"))
+        return
 
-  age = int(message.text)
-
-  if not (16 <= age <= 70):
-    if lang == "uz":
-      await message.answer(
-          "Yoshingiz 16 dan 70 gacha bo'lishi kerak. Qaytadan kiriting:"
-      )
-    elif lang == "en":
-      await message.answer("Age must be between 16 and 70. Please enter again:")
-    else:
-      await message.answer(
-          "Возраст должен быть от 16 до 70 лет. Пожалуйста, введите корректное"
-          " число:"
-      )
-    return
-
-  await state.update_data(age=age)
-  await state.set_state(RegistrationStates.waiting_for_location)
-
-  if lang == "uz":
-    text = "3️⃣ Yashashingiz hududni aniqlash uchun lokatsiyatingizni yuboring:"
-  elif lang == "en":
-    text = "3️⃣ Please send your location to determine your city:"
-  else:
-    text = "3️⃣ Пожалуйста, отправьте вашу локацию, чтобы указать город в анкете:"
-
-  await message.answer(text, reply_markup=get_location_keyboard(lang))
+    await state.update_data(age=age)
+    await state.set_state(RegistrationStates.waiting_for_location)
+    await message.answer(get_t(user_id, "location_prompt"), reply_markup=get_location_keyboard(user_id))
 
 
 @dp.message(RegistrationStates.waiting_for_location, F.location)
 async def process_location(message: types.Message, state: FSMContext):
-  city = "Ташкент"
-  await state.update_data(city=city)
-  await state.set_state(RegistrationStates.waiting_for_description)
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  if lang == "uz":
-    await message.answer(
-        "4️⃣ O'zingiz haqingizda qisqacha yozing (Opisaniya):",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
-  elif lang == "en":
-    await message.answer(
-        "4️⃣ Write a short description about yourself:",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
-  else:
-    await message.answer(
-        "4️⃣ Расскажите немного о себе (Напишите описание):",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
+    lat = message.location.latitude
+    lon = message.location.longitude
+    await state.update_data(city="Ташкент", latitude=lat, longitude=lon)
+    await state.set_state(RegistrationStates.waiting_for_description)
+    user_id = message.from_user.id
+    await message.answer(get_t(user_id, "desc_prompt"), reply_markup=types.ReplyKeyboardRemove())
 
 
 @dp.message(RegistrationStates.waiting_for_location)
 async def process_location_fallback(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-  if lang == "uz":
-    await message.answer("Iltimos, tugmani bosib lokatsiya yuboring 📍")
-  elif lang == "en":
-    await message.answer("Please send your location using the button 📍")
-  else:
-    await message.answer("Пожалуйста, отправьте локацию с помощью кнопки 📍")
+    user_id = message.from_user.id
+    await message.answer(get_t(user_id, "location_fallback"))
 
 
 @dp.message(RegistrationStates.waiting_for_description)
 async def process_description(message: types.Message, state: FSMContext):
-  await state.update_data(description=message.text)
-  await state.update_data(media=[])
-  await state.set_state(RegistrationStates.waiting_for_media)
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  if lang == "uz":
-    await message.answer(
-        "5️⃣ Endi 1 tadan 3 tagacha rasm yoki video yuboring.\nBarchasini"
-        " yuborib bo'lgach, **Tayyor** deb yozing."
-    )
-  elif lang == "en":
-    await message.answer(
-        "5️⃣ Now send from 1 to 3 photos or videos.\nWhen you are finished, type"
-        " **Ready**."
-    )
-  else:
-    await message.answer(
-        "5️⃣ Теперь отправьте от 1 до 3 фото или видео.\nКогда закончите"
-        " отправку файлов, напишите слово **Готово**."
-    )
-
-
-async def finish_registration(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  name = user_data.get("name")
-  age = user_data.get("age")
-  city = user_data.get("city", "Ташкент")
-  desc = user_data.get("description")
-  media_list = user_data.get("media", [])
-
-  caption_text = f"{name}, {age}, {city} — {desc}"
-
-  if len(media_list) == 1:
-    m_type, file_id = media_list[0]
-    if m_type == "photo":
-      await message.answer_photo(photo=file_id, caption=caption_text)
-    else:
-      await message.answer_video(video=file_id, caption=caption_text)
-  elif len(media_list) > 1:
-    album_builder = []
-    for idx, (m_type, file_id) in enumerate(media_list):
-      if m_type == "photo":
-        if idx == 0:
-          album_builder.append(
-              types.InputMediaPhoto(media=file_id, caption=caption_text)
-          )
-        else:
-          album_builder.append(types.InputMediaPhoto(media=file_id))
-      else:
-        if idx == 0:
-          album_builder.append(
-              types.InputMediaVideo(media=file_id, caption=caption_text)
-          )
-        else:
-          album_builder.append(types.InputMediaVideo(media=file_id))
-
-    await message.answer_media_group(media=album_builder)
-
-  if lang == "uz":
-    await message.answer(
-        "✅ Anketangiz muvaffaqiyatli yaratildi!\n\nEndi davom etamiz."
-        " Jinsingizni tanlang:"
-    )
-  elif lang == "en":
-    await message.answer(
-        "✅ Your profile has been successfully created!\n\nLet's continue."
-        " Select your gender:"
-    )
-  else:
-    await message.answer(
-        "✅ Ваша анкета успешно создана!\n\nИдем дальше. Определимся с полом:"
-    )
-
-  await state.set_state(RegistrationStates.waiting_for_gender)
-  await message.answer(
-      "Выберите ваш пол:"
-      if lang == "ru"
-      else ("Jinsingizni tanlang:" if lang == "uz" else "Select your gender:"),
-      reply_markup=get_gender_reply_keyboard(lang),
-  )
-
-
-@dp.message(RegistrationStates.waiting_for_gender)
-async def process_gender(message: types.Message, state: FSMContext):
-  text = message.text.lower()
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  if "парень" in text or "guy" in text or "yigitman" in text:
-    gender = "male"
-  elif "девушка" in text or "girl" in text or "qizman" in text:
-    gender = "female"
-  else:
-    if lang == "uz":
-      await message.answer("Iltimos, tugmalardan birini bosing!")
-    elif lang == "en":
-      await message.answer("Please use the buttons below!")
-    else:
-      await message.answer("Пожалуйста, выберите вариант с помощью кнопок!")
-    return
-
-  await state.update_data(gender=gender)
-  await state.set_state(RegistrationStates.waiting_for_preference)
-
-  if lang == "uz":
-    pref_text = "Kimlar sizni qiziqtiradi?"
-  elif lang == "en":
-    pref_text = "Who are you interested in?"
-  else:
-    pref_text = "Кто тебе интересен?"
-
-  await message.answer(
-      pref_text, reply_markup=get_preference_reply_keyboard(lang)
-  )
-
-
-@dp.message(RegistrationStates.waiting_for_preference)
-async def process_preference(message: types.Message, state: FSMContext):
-  text = message.text.lower()
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-
-  if "парни" in text or "guys" in text or "yigitlar" in text:
-    pref = "male"
-  elif "девушки" in text or "girls" in text or "qizlar" in text:
-    pref = "female"
-  elif "все" in text or "everyone" in text or "farqi" in text or "barchasi" in text:
-    pref = "all"
-  else:
-    if lang == "uz":
-      await message.answer("Iltimos, tugmalardan birini bosing!")
-    elif lang == "en":
-      await message.answer("Please use the buttons below!")
-    else:
-      await message.answer("Пожалуйста, выберите вариант с помощью кнопок!")
-    return
-
-  await state.update_data(preference=pref)
-
-  final_data = await state.get_data()
-  user_id = message.from_user.id
-  final_data["username"] = message.from_user.username
-  DATABASE[user_id] = final_data
-
-  await state.set_state(RegistrationStates.active)
-
-  if lang == "uz":
-    final_text = (
-        "🎉 Hammasi tayyor! Odamlarni qidirishni boshlash uchun /search"
-        " buyrug'ini yuboring."
-    )
-  elif lang == "en":
-    final_text = "🎉 All set! Send /search to start searching for people."
-  else:
-    final_text = "🎉 Все готово! Нажми /search, чтобы начать поиск людей."
-
-  await message.answer(final_text, reply_markup=types.ReplyKeyboardRemove())
+    user_id = message.from_user.id
+    if message.text and message.text.startswith('/'):
+        await message.answer(get_t(user_id, "desc_cmd_error"))
+        return
+    await state.update_data(description=message.text, media=[])
+    await state.set_state(RegistrationStates.waiting_for_media)
+    await message.answer(get_t(user_id, "media_prompt"))
 
 
 @dp.message(RegistrationStates.waiting_for_media)
 async def process_media(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-  media_list = user_data.get("media", [])
+    user_id = message.from_user.id
+    user_data = await state.get_data()
+    media_list = user_data.get("media", [])
 
-  if message.text and message.text.lower() in [
-      "готово",
-      "tayyor",
-      "ready",
-      "done",
-  ]:
-    if len(media_list) == 0:
-      if lang == "uz":
-        await message.answer("Iltimos, kamida bitta rasm yoki video yuboring!")
-      elif lang == "en":
-        await message.answer("Please send at least one photo or video!")
-      else:
-        await message.answer(
-            "Пожалуйста, отправьте хотя бы одно фото или видео!"
-        )
-      return
+    if message.text and message.text.lower() in ["готово", "done", "tayyor"]:
+        if len(media_list) == 0:
+            await message.answer(get_t(user_id, "media_error"))
+            return
+        await finish_registration(message, state)
+        return
 
-    await finish_registration(message, state)
-    return
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
 
-  if message.photo:
-    file_id = message.photo[-1].file_id
-    media_list.append(("photo", file_id))
-  elif message.video:
-    file_id = message.video.file_id
-    media_list.append(("video", file_id))
-  else:
-    if lang == "uz":
-      await message.answer(
-          "Iltimos, rasm/video yuboring yoki 'Tayyor' deb yozing."
-      )
-    elif lang == "en":
-      await message.answer("Please send a photo/video or type 'Ready'.")
+        is_nsfw = await check_image_nsfw(file_url)
+        if is_nsfw:
+            await message.answer(get_t(user_id, "nsfw_error"))
+            return
+
+        media_list.append(("photo", photo.file_id))
+    elif message.video:
+        media_list.append(("video", message.video.file_id))
     else:
-      await message.answer(
-          "Пожалуйста, отправьте фото или видео, либо напишите «Готово»."
-      )
-    return
+        await message.answer(get_t(user_id, "media_type_error"))
+        return
 
-  await state.update_data(media=media_list)
-
-  if len(media_list) >= 3:
-    await finish_registration(message, state)
-  else:
-    remaining = 3 - len(media_list)
-    if lang == "uz":
-      await message.answer(
-          f"Qabul qilindi! Yana {remaining} ta rasm/video yuborishingiz mumkin"
-          " yoki **Tayyor** deb yozing."
-      )
-    elif lang == "en":
-      await message.answer(
-          f"Received! You can send {remaining} more photo/video or type"
-          " **Ready**."
-      )
+    await state.update_data(media=media_list)
+    if len(media_list) >= 3:
+        await finish_registration(message, state)
     else:
-      await message.answer(
-          f"Принято! Можете отправить еще {remaining} файл(а) или написать"
-          " **Готово**."
-      )
+        remaining = 3 - len(media_list)
+        await message.answer(get_t(user_id, "media_saved").format(remaining=remaining))
+
+
+async def finish_registration(message: types.Message, state: FSMContext):
+    await state.set_state(RegistrationStates.waiting_for_gender)
+    user_id = message.from_user.id
+    await message.answer(get_t(user_id, "gender_prompt"), reply_markup=get_gender_reply_keyboard(user_id))
+
+
+@dp.message(RegistrationStates.waiting_for_gender)
+async def process_gender(message: types.Message, state: FSMContext):
+    text = message.text.lower()
+    user_id = message.from_user.id
+
+    if "парень" in text or "yigitman" in text or "guy" in text:
+        gender = "male"
+    elif "девушка" in text or "qizman" in text or "girl" in text:
+        gender = "female"
+    else:
+        await message.answer(get_t(user_id, "gender_error"))
+        return
+
+    await state.update_data(gender=gender)
+    await state.set_state(RegistrationStates.waiting_for_preference)
+    await message.answer(get_t(user_id, "preference_prompt"), reply_markup=get_preference_reply_keyboard(user_id))
+
+
+@dp.message(RegistrationStates.waiting_for_preference)
+async def process_preference(message: types.Message, state: FSMContext):
+    text = message.text.lower()
+    user_id = message.from_user.id
+
+    if "парни" in text or "yigitlar" in text or "guys" in text:
+        pref = "male"
+    elif "девушки" in text or "qizlar" in text or "girls" in text:
+        pref = "female"
+    elif "все" in text or "barchasi" in text or "everyone" in text:
+        pref = "all"
+    else:
+        await message.answer(get_t(user_id, "gender_error"))
+        return
+
+    await state.update_data(preference=pref)
+    final_data = await state.get_data()
+    final_data["username"] = message.from_user.username
+    DATABASE[user_id] = final_data
+    INACTIVE_USERS.discard(user_id)
+
+    await state.set_state(RegistrationStates.active)
+    await message.answer(get_t(user_id, "registration_done"), reply_markup=get_main_menu_keyboard(user_id))
 
 
 @dp.message(Command("search"))
+@dp.message(F.text.in_([
+    "🔍 Искать анкеты", "🔍 Продолжить поиск",
+    "🔍 Anketalarni qidirish", "🔍 Qidirishni davom ettirish",
+    "🔍 Search profiles", "🔍 Continue search"
+]))
 async def cmd_search(message: types.Message, state: FSMContext):
-  user_id = message.from_user.id
+    user_id = message.from_user.id
 
-  if user_id not in DATABASE:
-    await message.answer("Сначала создайте свою анкету! Нажмите /start")
-    return
+    if user_id not in DATABASE:
+        await message.answer(get_t(user_id, "no_profile"), reply_markup=get_main_menu_keyboard(user_id))
+        return
 
-  user_data = DATABASE[user_id]
-  await state.set_data(user_data)
-  lang = user_data.get("language", "ru")
+    if user_id in INACTIVE_USERS:
+        await message.answer(get_t(user_id, "profile_hidden"), reply_markup=get_main_menu_keyboard(user_id))
+        return
 
-  incoming_list = INCOMING_LIKES.get(user_id, [])
-  incoming_profiles = []
-  for uid in incoming_list:
-    if uid in DATABASE:
-      my_liked_set = LIKES.get(user_id, set())
-      if uid not in my_liked_set:
-        incoming_profiles.append((uid, DATABASE[uid]))
+    user_data = DATABASE[user_id]
+    await state.set_data(user_data)
 
-  general_profiles = []
-  for uid, profile in DATABASE.items():
-    if uid == user_id:
-      continue
+    incoming_list = INCOMING_LIKES.get(user_id, [])
+    incoming_profiles = []
+    for uid in incoming_list:
+        if uid in DATABASE and uid not in INACTIVE_USERS:
+            if uid not in LIKES.get(user_id, set()):
+                incoming_profiles.append((uid, DATABASE[uid]))
 
-    if any(uid == inc_id for inc_id, _ in incoming_profiles):
-      continue
+    general_profiles = []
+    for uid, profile in DATABASE.items():
+        if uid == user_id or uid in INACTIVE_USERS:
+            continue
+        if any(uid == inc_id for inc_id, _ in incoming_profiles):
+            continue
+        if uid in LIKES.get(user_id, set()):
+            continue
+        general_profiles.append((uid, profile))
 
-    my_liked_set = LIKES.get(user_id, set())
-    if uid in my_liked_set:
-      continue
-
-    general_profiles.append((uid, profile))
-
-  await state.update_data(
-      incoming_queue=incoming_profiles,
-      general_queue=general_profiles,
-      is_incoming_phase=len(incoming_profiles) > 0,
-      search_index=0,
-  )
-  await state.set_state(SearchStates.browsing)
-
-  if lang == "uz":
-    await message.answer("🔍 Qidiruv boshlandi!")
-  elif lang == "en":
-    await message.answer("🔍 Search started!")
-  else:
-    await message.answer("🔍 Поиск запущен!")
-
-  if incoming_profiles:
-    if lang == "uz":
-      await message.answer("💖 Kimdir sizga qiziqish bildirgan! Mana uning anketasi:")
-    elif lang == "en":
-      await message.answer("💖 Someone showed interest in you! Here is their profile:")
-    else:
-      await message.answer("💖 Кто-то заинтересовался вашей анкетой! Посмотрите:")
-
-  await show_next_profile(message, state)
+    await state.update_data(
+        incoming_queue=incoming_profiles,
+        general_queue=general_profiles,
+        is_incoming_phase=len(incoming_profiles) > 0,
+        search_index=0
+    )
+    await state.set_state(SearchStates.browsing)
+    await message.answer(get_t(user_id, "search_started"))
+    await show_next_profile(message, state)
 
 
 async def show_next_profile(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-  is_incoming = user_data.get("is_incoming_phase", True)
-  incoming_queue = user_data.get("incoming_queue", [])
-  general_queue = user_data.get("general_queue", [])
-  index = user_data.get("search_index", 0)
+    user_data = await state.get_data()
+    is_incoming = user_data.get("is_incoming_phase", True)
+    incoming_queue = user_data.get("incoming_queue", [])
+    general_queue = user_data.get("general_queue", [])
+    index = user_data.get("search_index", 0)
 
-  target_uid = None
-  profile = None
+    target_uid = None
+    profile = None
 
-  if is_incoming:
-    if index < len(incoming_queue):
-      target_uid, profile = incoming_queue[index]
+    if is_incoming:
+        if index < len(incoming_queue):
+            target_uid, profile = incoming_queue[index]
+        else:
+            is_incoming = False
+            index = 0
+            await state.update_data(is_incoming_phase=False, search_index=0)
+            if general_queue:
+                target_uid, profile = general_queue[0]
     else:
-      is_incoming = False
-      index = 0
-      await state.update_data(is_incoming_phase=False, search_index=0)
-      if general_queue:
-        target_uid, profile = general_queue[0]
-  else:
-    if index < len(general_queue):
-      target_uid, profile = general_queue[index]
+        if index < len(general_queue):
+            target_uid, profile = general_queue[index]
 
-  if not profile:
-    await state.set_state(RegistrationStates.active)
-    if lang == "uz":
-      await message.answer(
-          "Barcha anketalar ko'rib chiqildi!",
-          reply_markup=types.ReplyKeyboardRemove(),
-      )
-    elif lang == "en":
-      await message.answer(
-          "All profiles have been viewed!",
-          reply_markup=types.ReplyKeyboardRemove(),
-      )
+    user_id = message.from_user.id
+    if not profile:
+        await state.set_state(RegistrationStates.active)
+        await message.answer(get_t(user_id, "no_more_profiles"), reply_markup=get_main_menu_keyboard(user_id))
+        return
+
+    await state.update_data(search_index=index + 1, current_profile=profile, current_target_uid=target_uid)
+
+    name = profile.get("name")
+    age = profile.get("age")
+    desc = profile.get("description")
+    media_list = profile.get("media", [])
+
+    viewer_lat = DATABASE.get(user_id, {}).get("latitude")
+    viewer_lon = DATABASE.get(user_id, {}).get("longitude")
+    dist = calculate_distance(viewer_lat, viewer_lon, profile.get("latitude"), profile.get("longitude"))
+    distance_str = f"📍 {dist} км – " if dist is not None else ""
+
+    caption_text = f"{name}, {age}, {distance_str}{desc}"
+    keyboard = get_search_control_keyboard(user_id)
+
+    if len(media_list) > 0:
+        m_type, file_id = media_list[0]
+        if m_type == "photo":
+            await message.answer_photo(photo=file_id, caption=caption_text, reply_markup=keyboard)
+        else:
+            await message.answer_video(video=file_id, caption=caption_text, reply_markup=keyboard)
     else:
-      await message.answer(
-          "Вы посмотрели все доступные анкеты!",
-          reply_markup=types.ReplyKeyboardRemove(),
-      )
-    return
-
-  await state.update_data(
-      search_index=index + 1,
-      current_profile=profile,
-      current_target_uid=target_uid,
-  )
-
-  name = profile.get("name")
-  age = profile.get("age")
-  city = profile.get("city", "Ташкент")
-  desc = profile.get("description")
-  media_list = profile.get("media", [])
-  profile_gender = profile.get("gender", "male")
-
-  caption_text = f"{name}, {age}, {city} — {desc}"
-  keyboard = get_search_control_keyboard(lang, profile_gender)
-
-  if len(media_list) > 0:
-    m_type, file_id = media_list[0]
-    if m_type == "photo":
-      await message.answer_photo(
-          photo=file_id, caption=caption_text, reply_markup=keyboard
-      )
-    else:
-      await message.answer_video(
-          video=file_id, caption=caption_text, reply_markup=keyboard
-      )
-  else:
-    await message.answer(caption_text, reply_markup=keyboard)
+        await message.answer(caption_text, reply_markup=keyboard)
 
 
 @dp.message(SearchStates.waiting_for_message)
 async def process_user_message_to_target(message: types.Message, state: FSMContext):
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-  target_uid = user_data.get("current_target_uid")
+    user_data = await state.get_data()
+    target_uid = user_data.get("current_target_uid")
+    user_id = message.from_user.id
+    text = message.text
 
-  text = message.text
-  if text and text.lower() in ["❌ отменить", "❌ cancel", "❌ bekor qilish"]:
+    if text and text.lower() in ["❌ отменить", "❌ bekor qilish", "❌ cancel"]:
+        await state.set_state(SearchStates.browsing)
+        await message.answer(get_t(user_id, "msg_cancelled"), reply_markup=get_search_control_keyboard(user_id))
+        return
+
+    if target_uid:
+        if user_id not in LIKES:
+            LIKES[user_id] = set()
+        LIKES[user_id].add(target_uid)
+
+        if not (1000 <= target_uid <= 2000):
+            try:
+                sender_name = DATABASE.get(user_id, {}).get("name", "Пользователь")
+                msg_notification = f"💌 {sender_name} оставил(а) для вас сообщение и лайк:\n\n{text}"
+                await bot.send_message(chat_id=target_uid, text=msg_notification)
+            except Exception as e:
+                logging.error(f"Error sending message: {e}")
+
+            if user_id in LIKES.get(target_uid, set()):
+                my_profile = DATABASE.get(user_id, {})
+                target_profile = DATABASE.get(target_uid, {})
+                match_text = get_t(user_id, "match_text")
+                await send_profile_to_user(user_id, target_profile, match_text)
+                await send_profile_to_user(target_uid, my_profile, match_text)
+            else:
+                if target_uid not in INCOMING_LIKES:
+                    INCOMING_LIKES[target_uid] = []
+                if user_id not in INCOMING_LIKES[target_uid]:
+                    INCOMING_LIKES[target_uid].append(user_id)
+
+        await message.answer(get_t(user_id, "msg_sent"))
+
     await state.set_state(SearchStates.browsing)
-    if lang == "uz":
-      await message.answer("Xabar yuborish bekor qilindi.")
-    elif lang == "en":
-      await message.answer("Message sending cancelled.")
-    else:
-      await message.answer("Отправка сообщения отменена.")
-
-    profile = user_data.get("current_profile", {})
-    profile_gender = profile.get("gender", "male")
-    await message.answer(
-        "Продолжаем просмотр:" if lang == "ru" else "Davom etamiz:",
-        reply_markup=get_search_control_keyboard(lang, profile_gender),
-    )
-    return
-
-  if target_uid:
-    try:
-      sender_name = user_data.get("name", "Пользователь")
-      if lang == "uz":
-        msg_notification = f"💌 {sender_name} sizga xabar yubordi:\n\n{text}"
-      elif lang == "en":
-        msg_notification = f"💌 {sender_name} sent you a message:\n\n{text}"
-      else:
-        msg_notification = f"💌 {sender_name} оставил(а) для вас сообщение:\n\n{text}"
-
-      await bot.send_message(chat_id=target_uid, text=msg_notification)
-
-      if lang == "uz":
-        await message.answer("✅ Xabaringiz yuborildi!")
-      elif lang == "en":
-        await message.answer("✅ Your message has been sent!")
-      else:
-        await message.answer("✅ Ваше сообщение успешно отправлено!")
-    except Exception as e:
-      logging.error(f"Error sending message to {target_uid}: {e}")
-
-  await state.set_state(SearchStates.browsing)
-  profile = user_data.get("current_profile", {})
-  profile_gender = profile.get("gender", "male")
-
-  if lang == "uz":
-    await message.answer(
-        "Keyingi anketa:",
-        reply_markup=get_search_control_keyboard(lang, profile_gender),
-    )
-  elif lang == "en":
-    await message.answer(
-        "Next profile:",
-        reply_markup=get_search_control_keyboard(lang, profile_gender),
-    )
-  else:
-    await message.answer(
-        "Следующая анкета:",
-        reply_markup=get_search_control_keyboard(lang, profile_gender),
-    )
-
-  await show_next_profile(message, state)
+    await message.answer("Следующая анкета:", reply_markup=get_search_control_keyboard(user_id))
+    await show_next_profile(message, state)
 
 
 @dp.message(SearchStates.browsing)
 async def process_search_actions(message: types.Message, state: FSMContext):
-  text = message.text.lower()
-  user_data = await state.get_data()
-  lang = user_data.get("language", "ru")
-  user_id = message.from_user.id
+    text = message.text.lower()
+    user_data = await state.get_data()
+    user_id = message.from_user.id
 
-  if "стоп" in text or "stop" in text or "to'xtatish" in text or "остановить" in text:
-    await state.set_state(RegistrationStates.active)
-    if lang == "uz":
-      await message.answer(
-          "Qidiruv to'xtatildi.", reply_markup=types.ReplyKeyboardRemove()
-      )
-    elif lang == "en":
-      await message.answer(
-          "Search stopped.", reply_markup=types.ReplyKeyboardRemove()
-      )
-    else:
-      await message.answer(
-          "Поиск завершен.", reply_markup=types.ReplyKeyboardRemove()
-      )
-    return
+    if "стоп" in text or "остановить" in text or "to'xtatish" in text or "stop" in text:
+        await state.set_state(RegistrationStates.active)
+        await message.answer(get_t(user_id, "search_stopped"), reply_markup=get_main_menu_keyboard(user_id))
+        return
 
-  if "сообщение" in text or "message" in text or "xabar" in text or "оставить" in text:
-    await state.set_state(SearchStates.waiting_for_message)
-    if lang == "uz":
-      await message.answer(
-          "Iltimos, ushbu foydalanuvchiga yubormoqchi bo'lgan xabaringizni"
-          " yozing:",
-          reply_markup=get_cancel_message_keyboard(lang),
-      )
-    elif lang == "en":
-      await message.answer(
-          "Please write the message you want to send to this user:",
-          reply_markup=get_cancel_message_keyboard(lang),
-      )
-    else:
-      await message.answer(
-          "Напишите текст сообщения, которое хотите отправить этому"
-          " пользователю:",
-          reply_markup=get_cancel_message_keyboard(lang),
-      )
-    return
+    if "сообщение" in text or "оставить" in text or "xabar" in text or "message" in text:
+        await state.set_state(SearchStates.waiting_for_message)
+        await message.answer(get_t(user_id, "write_msg_prompt"), reply_markup=get_cancel_message_keyboard(user_id))
+        return
 
-  if any(word in text for word in ["лайк", "like", "yoqdi", "понрав"]):
-    target_user_id = user_data.get("current_target_uid")
+    if "лайк" in text or "like" in text:
+        target_user_id = user_data.get("current_target_uid")
+        if target_user_id:
+            if user_id not in LIKES:
+                LIKES[user_id] = set()
+            LIKES[user_id].add(target_user_id)
 
-    if target_user_id:
-      if user_id not in LIKES:
-        LIKES[user_id] = set()
-      LIKES[user_id].add(target_user_id)
+            if not (1000 <= target_user_id <= 2000):
+                if user_id in LIKES.get(target_user_id, set()):
+                    match_text = get_t(user_id, "match_text")
+                    await send_profile_to_user(user_id, DATABASE.get(target_user_id, {}), match_text)
+                    await send_profile_to_user(target_user_id, DATABASE.get(user_id, {}), match_text)
+                else:
+                    if target_user_id not in INCOMING_LIKES:
+                        INCOMING_LIKES[target_user_id] = []
+                    if user_id not in INCOMING_LIKES[target_user_id]:
+                        INCOMING_LIKES[target_user_id].append(user_id)
 
-      target_liked_set = LIKES.get(target_user_id, set())
-      is_mutual = user_id in target_liked_set
+            await message.answer(get_t(user_id, "like"))
+        await show_next_profile(message, state)
+        return
 
-      if is_mutual:
-        my_profile = DATABASE.get(user_id, {})
-        target_profile = DATABASE.get(target_user_id, {})
+    if "не нрав" in text or "yoqmadi" in text or "dislike" in text:
+        await message.answer(get_t(user_id, "dislike"))
+        await show_next_profile(message, state)
+        return
 
-        if lang == "uz":
-          match_text = "🎉 O'zaro simpatiya! Mana uning kontaktlari:"
-        elif lang == "en":
-          match_text = "🎉 Mutual like! Here are their contacts:"
-        else:
-          match_text = "🎉 Взаимная симпатия! Вот контакт:"
 
-        await send_profile_to_user(user_id, target_profile, match_text)
-        await send_profile_to_user(target_user_id, my_profile, match_text)
-      else:
-        if target_user_id not in INCOMING_LIKES:
-          INCOMING_LIKES[target_user_id] = []
-        if user_id not in INCOMING_LIKES[target_user_id]:
-          INCOMING_LIKES[target_user_id].append(user_id)
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
 
-        if lang == "uz":
-          await message.answer("❤️ Sizga yoqdi!")
-        elif lang == "en":
-          await message.answer("❤️ Liked!")
-        else:
-          await message.answer("❤️ Записано!")
 
-    await show_next_profile(message, state)
-    return
-
-  if any(word in text for word in ["не понрав", "dislike", "yoqmadi"]):
-    if lang == "uz":
-      await message.answer("💔 O'tkazib yuborildi.")
-    elif lang == "en":
-      await message.answer("💔 Passed.")
-    else:
-      await message.answer("💔 Пропущено.")
-
-    await show_next_profile(message, state)
-    return
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 
 async def main():
-  logging.info("Starting bot polling...")
-  await dp.start_polling(bot, drop_pending_updates=True)
+    add_fake_profiles()
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(send_broadcast, "interval", hours=8)
+    scheduler.start()
+    asyncio.create_task(web_server())
+    logging.info("Starting bot polling & scheduler...")
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+    asyncio.run(main())
